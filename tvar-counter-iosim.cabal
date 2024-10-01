@@ -19,3 +19,5 @@ test-suite tvar-counter-iosim-test
     base ^>=4.18.2.1,
     io-classes:{io-classes, strict-stm},
     io-sim,
+    tasty,
+    tasty-quickcheck,
