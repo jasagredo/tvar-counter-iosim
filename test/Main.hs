@@ -1,4 +1,5 @@
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Main (main) where
 
@@ -7,30 +8,40 @@ import Control.Monad.Class.MonadAsync
 import Control.Monad.Class.MonadTest
 import Control.Monad.Class.MonadTimer
 import Control.Monad.IOSim
-import Data.Bifunctor
 import Test.QuickCheck
+import Test.QuickCheck.Monadic
 import Test.Tasty
 import Test.Tasty.QuickCheck
 
-data AtomicCounter s = AtomicCounter (StrictTVar (IOSim s) Int)
+--------------------------------------------------------------------------------
+-- Implementation, polymorphic on @m@
 
-newCounter :: IOSim s (AtomicCounter s)
+newtype AtomicCounter m = AtomicCounter (StrictTVar m Int)
+
+newCounter :: (MonadLabelledSTM m) => m (AtomicCounter m)
 newCounter = do
     ref <- newTVarIO 0
     atomically $ labelTVar ref "TheCounter"
     return (AtomicCounter ref)
 
-incr :: Maybe (Int, Int) -> AtomicCounter s -> IOSim s ()
-incr mDelays (AtomicCounter ref) = do
-    -- Introduce delays to test with IOSim
-    maybe (pure ()) (threadDelay . fst) mDelays
+incr :: (MonadSTM m) => AtomicCounter m -> m ()
+incr (AtomicCounter ref) = do
     i <- readTVarIO ref
-    -- Introduce delays to test with IOSim
-    maybe (pure ()) (threadDelay . snd) mDelays
     atomically $ writeTVar ref (i + 1)
 
-get :: AtomicCounter s -> IOSim s Int
+get :: (MonadSTM m) => AtomicCounter m -> m Int
 get (AtomicCounter ref) = readTVarIO ref
+
+-- Helper for generating random schedules in IOSim
+incrWithDelays :: (MonadSTM m, MonadDelay m) => (Int, Int) -> AtomicCounter m -> m ()
+incrWithDelays (t1, t2) (AtomicCounter ref) = do
+    threadDelay t1
+    i <- readTVarIO ref
+    threadDelay t2
+    atomically $ writeTVar ref (i + 1)
+
+--------------------------------------------------------------------------------
+-- Tests
 
 main :: IO ()
 main =
@@ -38,24 +49,48 @@ main =
         testGroup
             "Broken counter"
             [ testProperty "IOSimPOR finds race" $
-                expectFailure $
-                    exploreSimTrace
-                        (\opts -> opts{explorationDebugLevel = 1})
-                        (testCase Nothing Nothing)
-                        ( \_ tr ->
-                            case traceResult False tr of
-                                Left err -> counterexample (show err) $ property False
-                                Right tw -> tw === 2
-                        )
-            , testProperty "IOSim finds race" $ \x ->
-                2 === runSimOrThrow (uncurry testCase . bimap Just Just $ x)
-            , testProperty "IOSim also finds ok case" $ \x ->
-                2 =/= runSimOrThrow (uncurry testCase . bimap Just Just $ x)
+                exploreSimTrace
+                    (\opts -> opts{explorationDebugLevel = 1})
+                    testCase'
+                    ( \_ tr ->
+                        case traceResult False tr of
+                            Left err -> counterexample (show err) $ property False
+                            Right tw -> tw === 2
+                    )
+            , testProperty "IOSim eventually finds race" $ \x ->
+                2 === runSimOrThrow (testCase x)
+            , testProperty "IOSim eventually finds ok case" $ \x ->
+                2 =/= runSimOrThrow (testCase x)
+            , testProperty "IO eventually finds race" $ monadicIO $ do
+                res <- run $ testCase' @IO
+                assertWith (res == 2) (show res <> " =/= 2")
+            , testProperty "IO eventually finds ok case" $ monadicIO $ do
+                res <- run $ testCase' @IO
+                assertWith (res /= 2) (show res <> " === 2")
             ]
   where
-    testCase :: forall s. Maybe (Int, Int) -> Maybe (Int, Int) -> IOSim s Int
-    testCase delays1 delays2 = do
+    testCase ::
+        ( MonadAsync m
+        , MonadLabelledSTM m
+        , MonadDelay m
+        ) =>
+        ((Int, Int), (Int, Int)) -> m Int
+    testCase delays = do
+        counter <- newCounter
+        _ <-
+            concurrently
+                (incrWithDelays (fst delays) counter)
+                (incrWithDelays (snd delays) counter)
+        get counter
+
+    testCase' ::
+        ( MonadAsync m
+        , MonadTest m
+        , MonadLabelledSTM m
+        ) =>
+        m Int
+    testCase' = do
         exploreRaces
         counter <- newCounter
-        _ <- concurrently (incr delays1 counter) (incr delays2 counter)
+        _ <- concurrently (incr counter) (incr counter)
         get counter
