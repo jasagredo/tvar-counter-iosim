@@ -13,6 +13,12 @@ shows how:
   monad `m` which is a instance of some typeclasses (of which both `IO` and
   `IOSim` are instances).
 
+|            | Will find the race always | Is reproducible/deterministic |
+|------------|---------------------------|-------------------------------|
+| `IO`       | :x:                       | :x:                           |
+| `IOSim`    | :x:                       | :white_check_mark:            |
+| `IOSimPOR` | :white_check_mark:        | :white_check_mark:            |
+
 ## Example
 
 The implementation is indeed racy because `incr` is not defined as an
